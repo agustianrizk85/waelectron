@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline';"
+    />
+    <title>WA Electron</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- Connection / QR overlay -->
+    <div id="overlay" class="overlay">
+      <div class="overlay-card">
+        <h1>WA Electron</h1>
+        <p id="overlay-status">Memulai…</p>
+        <div id="qr-wrap" class="qr-wrap hidden">
+          <img id="qr-img" alt="QR Code" />
+          <p class="hint">
+            Buka WhatsApp di HP &rarr; Perangkat tertaut &rarr; Tautkan perangkat
+          </p>
+        </div>
+        <div id="loading-bar" class="loading-bar hidden">
+          <div id="loading-fill"></div>
+        </div>
+        <button id="retry-btn" class="btn hidden">Coba lagi</button>
+      </div>
+    </div>
+
+    <!-- Main app -->
+    <div id="app" class="app hidden">
+      <aside class="sidebar">
+        <header class="sidebar-head">
+          <div class="me">
+            <div id="me-name" class="me-name">—</div>
+            <div id="me-number" class="me-number"></div>
+          </div>
+          <div class="head-actions">
+            <button id="autoreply-toggle" class="pill off" title="Auto-reply LaLa AI (klik untuk on/off)">🤖 LaLa: OFF</button>
+            <button id="reminder-btn" class="icon-btn" title="Reminder">⏰</button>
+            <button id="ai-btn" class="icon-btn" title="LaLa AI (Ollama)">🤖</button>
+            <button id="master-btn" class="icon-btn" title="Master Data Divisi">📇</button>
+            <button id="logout-btn" class="icon-btn" title="Keluar">⏻</button>
+          </div>
+        </header>
+        <input id="search" class="search" placeholder="Cari chat…" />
+        <div id="chat-list" class="chat-list"></div>
+      </aside>
+
+      <main class="chat-pane">
+        <header id="chat-header" class="chat-header">
+          <span id="chat-title">Pilih chat</span>
+        </header>
+        <div id="messages" class="messages"></div>
+        <form id="composer" class="composer hidden">
+          <button
+            type="button"
+            id="draft-btn"
+            class="ai-draft-btn"
+            title="Draft balasan dengan LaLa AI"
+          >✨ LaLa</button>
+          <input
+            id="msg-input"
+            class="msg-input"
+            placeholder="Ketik pesan / poin lalu ✨ AI…"
+            autocomplete="off"
+          />
+          <button type="submit" class="send-btn">Kirim</button>
+        </form>
+      </main>
+    </div>
+
+    <!-- Master Data Divisi -->
+    <div id="master-view" class="master-view hidden">
+      <header class="master-head">
+        <button id="master-back" class="btn-ghost">&larr; Kembali</button>
+        <h2>Master Data Divisi</h2>
+        <span class="master-sub">Divisi &bull; Kadev &bull; Nomor WA</span>
+      </header>
+
+      <div class="master-body">
+        <form id="md-form" class="md-form">
+          <input type="hidden" id="md-id" />
+          <input id="md-divisi" class="md-in" placeholder="Divisi" required />
+          <input id="md-kadev" class="md-in" placeholder="Kadev (kepala divisi)" />
+          <input id="md-number" class="md-in" placeholder="Nomor WA (08… / 62…)" />
+          <button type="submit" class="send-btn" id="md-submit">Tambah</button>
+          <button type="button" class="btn-ghost hidden" id="md-cancel">Batal</button>
+        </form>
+
+        <table class="md-table">
+          <thead>
+            <tr>
+              <th>Divisi</th>
+              <th>Kadev</th>
+              <th>Nomor WA</th>
+              <th class="md-act">Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="md-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- AI (Ollama) settings -->
+    <div id="ai-view" class="master-view hidden">
+      <header class="master-head">
+        <button id="ai-back" class="btn-ghost">&larr; Kembali</button>
+        <h2>LaLa AI — Ollama</h2>
+        <span id="ai-status" class="master-sub">—</span>
+      </header>
+      <div class="master-body ai-body">
+        <label class="fld">
+          <span>Base URL Ollama</span>
+          <input id="ai-baseurl" class="md-in" placeholder="http://localhost:11434" />
+        </label>
+        <label class="fld">
+          <span>Model</span>
+          <select id="ai-model" class="md-in"></select>
+        </label>
+        <label class="fld checkbox">
+          <input type="checkbox" id="ai-autoreply" />
+          <span>Auto-reply pesan masuk (mengirim otomatis, grounded master data)</span>
+        </label>
+        <label class="fld">
+          <span>System prompt (persona AI)</span>
+          <textarea id="ai-prompt" class="md-in ta" rows="4"></textarea>
+        </label>
+        <div class="ai-actions">
+          <button id="ai-test" class="btn-ghost">Tes koneksi</button>
+          <button id="ai-save" class="send-btn">Simpan</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reminder -->
+    <div id="rem-view" class="master-view hidden">
+      <header class="master-head">
+        <button id="rem-back" class="btn-ghost">&larr; Kembali</button>
+        <h2>Reminder WA</h2>
+        <span class="master-sub">Kirim pesan terjadwal ke kadev divisi</span>
+      </header>
+      <div class="master-body">
+        <form id="rem-form" class="rem-form">
+          <input type="hidden" id="rem-id" />
+          <div class="rem-grid">
+            <label class="fld">
+              <span>Target (dari Master Data)</span>
+              <select id="rem-target" class="md-in"></select>
+            </label>
+            <label class="fld">
+              <span>Mode</span>
+              <select id="rem-mode" class="md-in">
+                <option value="once">Sekali (tanggal & jam)</option>
+                <option value="daily">Harian (jam)</option>
+              </select>
+            </label>
+            <label class="fld" id="rem-at-once">
+              <span>Waktu</span>
+              <input id="rem-datetime" class="md-in" type="datetime-local" />
+            </label>
+            <label class="fld hidden" id="rem-at-daily">
+              <span>Jam</span>
+              <input id="rem-time" class="md-in" type="time" />
+            </label>
+          </div>
+          <label class="fld">
+            <span>Pesan</span>
+            <textarea id="rem-message" class="md-in ta" rows="3" placeholder="Isi pesan reminder…"></textarea>
+          </label>
+          <div class="ai-actions">
+            <input id="rem-aipoints" class="md-in" placeholder="Poin singkat → susun dgn AI" />
+            <button type="button" id="rem-ai" class="btn-ghost">✨ Susun AI</button>
+            <button type="button" id="rem-cancel" class="btn-ghost hidden">Batal</button>
+            <button type="submit" class="send-btn" id="rem-submit">Tambah</button>
+          </div>
+        </form>
+
+        <table class="md-table">
+          <thead>
+            <tr>
+              <th>Target</th>
+              <th>Jadwal</th>
+              <th>Pesan</th>
+              <th class="md-act">Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="rem-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="renderer.js"></script>
+  </body>
+</html>

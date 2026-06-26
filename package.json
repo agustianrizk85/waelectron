@@ -1,0 +1,35 @@
+{
+  "name": "waelectron",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WhatsApp desktop client (Electron + whatsapp-web.js)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.greenpark.waelectron",
+    "productName": "WA Electron",
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "pg": "^8.22.0",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.26.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}

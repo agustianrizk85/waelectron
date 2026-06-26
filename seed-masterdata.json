@@ -1,0 +1,8 @@
+[
+  { "id": "sales",       "divisi": "Sales",       "kadev": "Kepala Divisi Sales",       "number": "" },
+  { "id": "marketing",   "divisi": "Marketing",   "kadev": "Kepala Dept. Marketing",    "number": "" },
+  { "id": "keuangan",    "divisi": "Keuangan",    "kadev": "Kepala Divisi Keuangan",    "number": "" },
+  { "id": "perencanaan", "divisi": "Perencanaan", "kadev": "Kepala Divisi Perencanaan", "number": "" },
+  { "id": "permit",      "divisi": "Permit/Legal","kadev": "Kepala Divisi Permit/Legal","number": "" },
+  { "id": "teknik",      "divisi": "Teknik",      "kadev": "Kepala Divisi Teknik",      "number": "" }
+]
