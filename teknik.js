@@ -217,10 +217,12 @@ function scanBloks(text, m, proyek) {
     .filter((u) => !proyek || norm(u.proyek) === norm(proyek))
     .forEach((u) => known.set(normBlok(u.blok), u.blok));
   const found = [];
-  const re = /\b([A-Z]{1,3})\s*[-.]?\s*(\d+(?:[.]\d+)?)\b/gi;
+  // Tangkap blok multi-bagian utuh: "A2-1" ≠ "A2" (dua unit berbeda!) —
+  // regex lama membuang "-1" sehingga salah unit.
+  const re = /\b([A-Z]{1,3}\s*[-. ]?\s*\d+(?:\s*[-.]\s*\d+)*)\b/gi;
   let mt;
   while ((mt = re.exec(text))) {
-    const key = normBlok(mt[1] + mt[2]);
+    const key = normBlok(mt[1]);
     const orig = known.get(key);
     if (orig && !found.includes(orig)) found.push(orig);
   }
@@ -613,6 +615,33 @@ function unitLabel(u) {
   return `${u.proyek} ${u.blok}${u.tipe ? ` (T${u.tipe})` : ''}`;
 }
 
+// Balasan cek detail unit + tawaran foto (dipakai jalur LLM & jalur blok-saja).
+async function cekDetail(chatId, units) {
+  const reply = await progressDetail(units);
+  const photos = [];
+  const per = units.length > 1 ? 3 : 5;
+  for (const u of units.slice(0, 3)) {
+    const ph = unitPhotos(u, per);
+    ph.files.forEach((f, i) =>
+      photos.push({
+        path: f,
+        caption: `📷 ${unitLabel(u)} — ${ph.date} (${i + 1}/${ph.files.length})`,
+      })
+    );
+  }
+  // Foto tidak langsung dikirim — tawarkan dulu, kirim setelah balas FOTO.
+  if (photos.length) {
+    pendingFoto.set(chatId, { photos, expires: Date.now() + PENDING_TTL });
+    return {
+      reply:
+        reply +
+        `\n\n📷 Ada ${photos.length} foto tersimpan untuk unit ini. ` +
+        `Balas *FOTO* untuk menampilkannya.`,
+    };
+  }
+  return { reply: reply + '\n\n(📷 belum ada foto tersimpan untuk unit ini)' };
+}
+
 const NEGATION = new Set(['BELUM', 'BLM', 'BLOM', 'TIDAK', 'GAK', 'GA', 'JANGAN', 'BATAL']);
 
 // Tambahkan item yang kata pertamanya disebut eksplisit di teks (unik, tanpa
@@ -883,6 +912,42 @@ async function handleIncoming({ body, chatId, senderNumber, senderName, history 
     // bukan jawaban konfirmasi — coba parse sebagai laporan baru di bawah
   }
 
+  // Pesan yang isinya cuma nama blok (± "cek/lihat/proyek") → langsung cek
+  // deterministik, tanpa LLM. Pola umum user malas ngetik: "A2-1", "VERSER A4".
+  try {
+    const mQ = await loadModel();
+    const ctxQ = lastCtx.get(chatId);
+    const proyekQ = scanProyek(text, mQ) || (ctxQ ? norm(ctxQ.proyek) : '');
+    if (proyekQ) {
+      const bloksQ = scanBloks(text, mQ, proyekQ).map(norm);
+      if (bloksQ.length) {
+        const FILLER = /^(CEK|LIHAT|LIAT|TAMPILKAN|BLOK|UNIT|PROYEK|DONG|DONK|YA|YAA|COBA|INFO|DATA|PROGRES|PROGRESS|DI|IN|SI|ITU|GIMANA|BERAPA|PERSEN)$/;
+        const leftovers = norm(text)
+          .replace(norm(proyekQ), ' ')
+          .replace(/\b([A-Z]{1,3}\s*[-. ]?\s*\d+(?:\s*[-.]\s*\d+)*)\b/gi, ' ')
+          .split(/[^A-Z0-9]+/)
+          .filter(Boolean)
+          .filter((w) => !bloksQ.some((b) => normBlok(b) === normBlok(w)))
+          .filter((w) => !FILLER.test(w));
+        if (!leftovers.length) {
+          const unitsQ = mQ.units.filter(
+            (u) =>
+              norm(u.proyek) === proyekQ &&
+              bloksQ.some((b) => normBlok(b) === normBlok(u.blok))
+          );
+          if (unitsQ.length) {
+            lastCtx.set(chatId, {
+              proyek: unitsQ[0].proyek,
+              bloks: [...new Set(unitsQ.map((u) => u.blok))],
+              at: Date.now(),
+            });
+            return cekDetail(chatId, unitsQ);
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
   const parsed = await parseReport(text, lastCtx.get(chatId));
   if (!parsed) return null; // bukan laporan progres → auto-reply biasa
   if (parsed.proyek || (parsed.units && parsed.units.length)) {
@@ -943,29 +1008,7 @@ async function handleIncoming({ body, chatId, senderNumber, senderName, history 
   if (parsed.action === 'cek') {
     // Blok disebut → detail per unit + foto tersimpan; tanpa blok → rekap proyek.
     if (parsed.bloks.length && parsed.units.length) {
-      const reply = await progressDetail(parsed.units);
-      const photos = [];
-      const per = parsed.units.length > 1 ? 3 : 5;
-      for (const u of parsed.units.slice(0, 3)) {
-        const ph = unitPhotos(u, per);
-        ph.files.forEach((f, i) =>
-          photos.push({
-            path: f,
-            caption: `📷 ${unitLabel(u)} — ${ph.date} (${i + 1}/${ph.files.length})`,
-          })
-        );
-      }
-      // Foto tidak langsung dikirim — tawarkan dulu, kirim setelah balas FOTO.
-      if (photos.length) {
-        pendingFoto.set(chatId, { photos, expires: Date.now() + PENDING_TTL });
-        return {
-          reply:
-            reply +
-            `\n\n📷 Ada ${photos.length} foto tersimpan untuk unit ini. ` +
-            `Balas *FOTO* untuk menampilkannya.`,
-        };
-      }
-      return { reply: reply + '\n\n(📷 belum ada foto tersimpan untuk unit ini)' };
+      return cekDetail(chatId, parsed.units);
     }
     // Blok disebut tapi tidak ketemu → JANGAN jatuh ke rekap proyek (bikin
     // bingung); beri tahu bloknya tidak ada + daftar blok yang terdaftar.

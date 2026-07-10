@@ -250,11 +250,13 @@ function replyTarget(chatId, senderNumber) {
 }
 
 // Benteng terakhir anti-dobel: jangan kirim teks IDENTIK ke target yang sama
-// dalam 30 detik, apa pun penyebab pemrosesan gandanya.
+// dalam jendela singkat. Dobel event asli terjadi dlm milidetik — jendela
+// cukup 8 dtk; lebih panjang malah MEMBISUKAN bot saat user bertanya ulang
+// hal yang jawabannya sama (pernah kejadian: bot "diam").
 const lastSentText = new Map(); // target -> { text, at }
 function shouldSend(target, text) {
   const prev = lastSentText.get(target);
-  if (prev && prev.text === text && Date.now() - prev.at < 30000) return false;
+  if (prev && prev.text === text && Date.now() - prev.at < 8000) return false;
   lastSentText.set(target, { text, at: Date.now() });
   return true;
 }
