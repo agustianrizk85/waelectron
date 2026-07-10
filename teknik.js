@@ -46,6 +46,62 @@ const lastCtx = new Map(); // chatId -> { proyek, bloks, at } (rujukan "disana"/
 let kendalaFile = '';
 let kendalaList = [];
 
+// ---- Riwayat input (persist ke userData/riwayat-input.json) -------------------
+// Setiap konfirmasi YA dicatat: kapan, siapa, unit, item apa. Menjawab
+// pertanyaan "kapan mereka input?" yang dulu tidak bisa dijawab.
+let riwayatFile = '';
+let riwayatList = [];
+
+function saveRiwayatFile() {
+  if (!riwayatFile) return;
+  try {
+    fs.writeFileSync(riwayatFile, JSON.stringify(riwayatList, null, 2));
+  } catch (_) {}
+}
+
+function recordInput({ units, items, mode, senderNumber, senderName }) {
+  riwayatList.push({
+    at: Date.now(),
+    mode: mode || 'tulis',
+    senderNumber: senderNumber || '',
+    senderName: senderName || '',
+    units: units.map((u) => ({ proyek: u.proyek, blok: u.blok })),
+    items: items.map((i) => i.name),
+  });
+  if (riwayatList.length > 2000) riwayatList = riwayatList.slice(-1500);
+  saveRiwayatFile();
+}
+
+function riwayatFor(proyek, bloks) {
+  return riwayatList
+    .filter((e) =>
+      e.units.some(
+        (u) =>
+          norm(u.proyek) === norm(proyek) &&
+          (!bloks.length || bloks.some((b) => normBlok(b) === normBlok(u.blok)))
+      )
+    )
+    .slice(-8)
+    .reverse();
+}
+
+function fmtWaktu(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${dateStr(d)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function riwayatLine(e) {
+  const who = e.senderName || (e.senderNumber ? '+' + e.senderNumber : 'tim');
+  const unitStr = e.units.map((u) => `${u.proyek} ${u.blok}`).join(', ');
+  const itemStr =
+    e.items.slice(0, 5).join(', ') +
+    (e.items.length > 5 ? `, … (${e.items.length} item)` : '');
+  return `${fmtWaktu(e.at)} — ${who} ${
+    e.mode === 'hapus' ? 'menghapus centang' : 'mencentang'
+  } ${e.items.length} item di ${unitStr}: ${itemStr}`;
+}
+
 // ---- Gaya bicara per nomor (persist ke userData/tone.json) --------------------
 // number -> { tone: 'lembut'|'kasar'|'bro', asked: bool }
 let toneFile = '';
@@ -64,6 +120,13 @@ async function init(userDataDir) {
     toneMap = JSON.parse(fs.readFileSync(toneFile, 'utf8')) || {};
   } catch (_) {
     toneMap = {};
+  }
+  riwayatFile = path.join(userDataDir, 'riwayat-input.json');
+  try {
+    riwayatList = JSON.parse(fs.readFileSync(riwayatFile, 'utf8'));
+    if (!Array.isArray(riwayatList)) riwayatList = [];
+  } catch (_) {
+    riwayatList = [];
   }
 }
 
@@ -486,6 +549,17 @@ async function consult(text, units, proyek, history, senderNumber, senderName) {
     dataText +=
       '\n\nKENDALA AKTIF TERCATAT:\n' + ks.map((k) => `- ${kendalaLine(k)}`).join('\n');
   }
+  const riw =
+    units && units.length
+      ? riwayatFor(units[0].proyek, units.map((u) => norm(u.blok)))
+      : proyek
+      ? riwayatFor(proyek, [])
+      : [];
+  if (riw.length) {
+    dataText +=
+      '\n\nRIWAYAT INPUT TERAKHIR:\n' +
+      riw.slice(0, 5).map((e) => `- ${riwayatLine(e)}`).join('\n');
+  }
   const sys =
     'Kamu LaLa, asisten AI Greenpark — teman satu tim, bukan robot. ' +
     toneLine(senderNumber) +
@@ -885,6 +959,13 @@ async function handleIncoming({ body, chatId, senderNumber, senderName, history 
       const cur = pending.get(chatId);
       pending.delete(chatId);
       const totals = await applyPending(cur);
+      recordInput({
+        units: cur.units,
+        items: cur.items,
+        mode: cur.mode,
+        senderNumber,
+        senderName,
+      });
       const isHapus = cur.mode === 'hapus';
       let fotoLine = '';
       if (!isHapus) {
@@ -910,6 +991,37 @@ async function handleIncoming({ body, chatId, senderNumber, senderName, history 
       return { reply: '❌ Dibatalkan. Tidak ada yang ditulis ke sheet.' };
     }
     // bukan jawaban konfirmasi — coba parse sebagai laporan baru di bawah
+  }
+
+  // Pertanyaan "kapan diinput / riwayat input" → jawab dari log riwayat,
+  // deterministik (dulu salah dijawab dump data cek berulang).
+  if (
+    /\briwayat\b|\bhistory\b|\blog\b/i.test(text) ||
+    (/\bkapan\b/i.test(text) && /\b(input|isi|update|data|lapor|centang)/i.test(text))
+  ) {
+    try {
+      const mR = await loadModel();
+      const ctxR = lastCtx.get(chatId);
+      const proyekR = scanProyek(text, mR) || (ctxR ? norm(ctxR.proyek) : '');
+      if (proyekR) {
+        const scanned = scanBloks(text, mR, proyekR).map(norm);
+        const bloksR = scanned.length
+          ? scanned
+          : ctxR && norm(ctxR.proyek) === proyekR
+          ? (ctxR.bloks || []).map(norm)
+          : [];
+        const rows = riwayatFor(proyekR, bloksR);
+        const label = `${proyekR}${bloksR.length ? ' ' + bloksR.join(', ') : ''}`;
+        return {
+          reply: rows.length
+            ? `🕘 Riwayat input ${label} (terbaru dulu):\n` +
+              rows.map((e) => `• ${riwayatLine(e)}`).join('\n')
+            : `Belum ada riwayat input tercatat untuk ${label}. ` +
+              `(Pencatatan riwayat baru aktif hari ini — input sebelum itu tidak terekam. ` +
+              `Centang lama di sheet juga tidak ada jejak waktunya.)`,
+        };
+      }
+    } catch (_) {}
   }
 
   // Pesan yang isinya cuma nama blok (± "cek/lihat/proyek") → langsung cek
@@ -1091,5 +1203,7 @@ module.exports = {
   getTone,
   toneLine,
   isBossNumber,
+  recordInput,
+  riwayatFor,
   FOTO_DIR,
 };
