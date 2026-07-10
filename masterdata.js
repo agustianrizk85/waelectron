@@ -76,6 +76,7 @@ function normalizeNumber(raw) {
   let n = String(raw || '').replace(/[^\d]/g, '');
   if (!n) return '';
   if (n.startsWith('0')) n = '62' + n.slice(1);
+  else if (n.startsWith('8')) n = '62' + n; // ditulis tanpa 0/62 (mis. 8784…)
   if (n.startsWith('620')) n = '62' + n.slice(3);
   return n;
 }

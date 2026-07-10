@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('wa', {
     ipcRenderer.invoke('wa:sendMessage', { chatId, text }),
   logout: () => ipcRenderer.invoke('wa:logout'),
   restart: () => ipcRenderer.invoke('wa:restart'),
+  resetSession: () => ipcRenderer.invoke('wa:resetSession'),
 
   // master data divisi / kadev / nomor
   md: {
@@ -41,6 +42,7 @@ contextBridge.exposeInMainWorld('wa', {
   on: (channel, cb) => {
     const allowed = [
       'wa:state',
+      'wa:stuck',
       'wa:qr',
       'wa:loading',
       'wa:me',

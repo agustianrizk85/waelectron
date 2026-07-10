@@ -34,6 +34,7 @@ function handleState(s) {
   $('qr-wrap').classList.toggle('hidden', s !== 'QR');
   const showRetry = ['AUTH_FAILURE', 'DISCONNECTED', 'LOGGED_OUT', 'ERROR'].includes(s);
   $('retry-btn').classList.toggle('hidden', !showRetry);
+  $('reset-btn').classList.toggle('hidden', !showRetry);
   if (s !== 'AUTHENTICATED' && s !== 'INITIALIZING') {
     $('loading-bar').classList.add('hidden');
   }
@@ -159,6 +160,22 @@ $('retry-btn').addEventListener('click', async () => {
   $('retry-btn').classList.add('hidden');
   await window.wa.restart();
 });
+
+// Reset sesi: hapus login tersimpan, mulai dari nol dengan QR baru.
+// Dipakai saat macet di "Terautentikasi, memuat…" (sesi basi) atau mau ganti akun.
+async function doResetSession() {
+  if (!confirm('Hapus sesi tersimpan dan scan ulang QR?')) return;
+  $('overlay-status').textContent = 'Mereset sesi…';
+  $('reset-btn').classList.add('hidden');
+  $('retry-btn').classList.add('hidden');
+  try {
+    await window.wa.resetSession();
+  } catch (err) {
+    toast('Reset gagal: ' + err.message);
+  }
+}
+$('reset-btn').addEventListener('click', doResetSession);
+$('reset-session-btn').addEventListener('click', doResetSession);
 
 // ---- Master Data Divisi -----------------------------------------------------
 
@@ -560,6 +577,11 @@ function toast(msg) {
 // ---- Wire main-process events ----------------------------------------------
 
 window.wa.on('wa:state', handleState);
+window.wa.on('wa:stuck', () => {
+  // Main mendeteksi hang >3 menit di AUTHENTICATED — tawarkan reset.
+  $('overlay-status').textContent = 'Macet memuat — sesi kemungkinan basi';
+  $('reset-btn').classList.remove('hidden');
+});
 window.wa.on('wa:qr', (dataUrl) => {
   $('qr-img').src = dataUrl;
 });

@@ -5,12 +5,13 @@ const { app, BrowserWindow, ipcMain, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const qrcode = require('qrcode');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const db = require('./db');
 const masterdata = require('./masterdata');
 const settings = require('./settings');
 const ollama = require('./ollama');
 const reminders = require('./reminders');
+const teknik = require('./teknik');
 
 // whatsapp-web.js bundles Puppeteer, but downloading Chromium fails in this
 // environment, so we point Puppeteer at the system Chrome install.
@@ -24,6 +25,8 @@ const SESSION_DIR = path.join(app.getPath('userData'), 'wa-session');
 let mainWindow = null;
 let client = null;
 let lastState = 'INITIALIZING';
+const processedMsgIds = new Set();
+const processedMsgKeys = new Set();
 
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -56,9 +59,45 @@ function createWindow() {
 
 // ---- WhatsApp client wiring -------------------------------------------------
 
+// Sesi basi bisa lolos autentikasi tapi hang sebelum `ready` — kasih tahu user
+// supaya pakai Reset Sesi, jangan menunggu tanpa batas.
+let stuckTimer = null;
 function setState(state) {
   lastState = state;
   send('wa:state', state);
+  clearTimeout(stuckTimer);
+  if (state === 'AUTHENTICATED') {
+    stuckTimer = setTimeout(() => {
+      if (lastState === 'AUTHENTICATED') {
+        send('wa:stuck');
+        send(
+          'wa:error',
+          'Macet memuat >3 menit — kemungkinan sesi basi. Klik "Reset Sesi" untuk scan ulang QR.'
+        );
+      }
+    }, 180000);
+  }
+}
+
+// Hapus total sesi tersimpan lalu mulai dari nol (QR baru).
+async function resetSession() {
+  if (client) {
+    try {
+      await client.destroy();
+    } catch (_) {}
+    client = null;
+  }
+  // Chrome kadang masih memegang lock file sesaat setelah destroy — coba ulang.
+  for (let i = 0; i < 5; i++) {
+    try {
+      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+      break;
+    } catch (_) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  setState('INITIALIZING');
+  buildClient();
 }
 
 function buildClient() {
@@ -115,8 +154,28 @@ function buildClient() {
   });
 
   client.on('message', async (msg) => {
+    // Pesan dari chat @lid bisa memicu DUA event dgn id BERBEDA (varian lid
+    // + varian nomor) → dedup id saja tidak cukup; teks di-dedup juga dgn
+    // kunci body+timestamp (Ollama deterministik → balasan dobel identik).
+    const mid = msg.id?._serialized;
+    if (mid) {
+      if (processedMsgIds.has(mid)) return;
+      processedMsgIds.add(mid);
+      if (processedMsgIds.size > 500) {
+        processedMsgIds.delete(processedMsgIds.values().next().value);
+      }
+    }
+    if (msg.body) {
+      const dupKey = `${msg.body}|${msg.timestamp}|${msg.type}`;
+      if (processedMsgKeys.has(dupKey)) return;
+      processedMsgKeys.add(dupKey);
+      if (processedMsgKeys.size > 500) {
+        processedMsgKeys.delete(processedMsgKeys.values().next().value);
+      }
+    }
     await relayMessage(msg, false);
-    await maybeAutoReply(msg);
+    const handled = await maybeTeknikReport(msg);
+    if (!handled) await maybeAutoReply(msg);
   });
 
   client.on('message_create', async (msg) => {
@@ -157,6 +216,130 @@ async function relayMessage(msg, fromMe) {
   }
 }
 
+// ---- Resolusi nomor pengirim --------------------------------------------------
+
+// Chat privasi baru memakai ID anonim "@lid" — chat.id.user BUKAN nomor telepon.
+// Terjemahkan lid → nomor asli via getContactLidAndPhone (di-cache per sesi).
+const lidNumberCache = new Map();
+async function resolveSenderNumber(wid) {
+  if (!wid) return '';
+  if (wid.server !== 'lid') return wid.user;
+  const ser = wid._serialized;
+  if (lidNumberCache.has(ser)) return lidNumberCache.get(ser);
+  try {
+    const [r] = await client.getContactLidAndPhone([ser]);
+    const num = r && r.pn ? String(r.pn).split('@')[0] : '';
+    if (num) {
+      lidNumberCache.set(ser, num);
+      return num;
+    }
+  } catch (_) {}
+  return wid.user;
+}
+
+// ---- Laporan progres Teknik → Google Sheet -----------------------------------
+
+// Kirim balasan bot. Chat @lid dikirim ke alamat nomor asli (@c.us) —
+// mengirim langsung ke @lid bisa terkirim dobel (bug wwebjs); pesan tetap
+// masuk ke percakapan yang sama.
+function replyTarget(chatId, senderNumber) {
+  // JANGAN alihkan @lid → @c.us: mengirim ke pn-chat yang aslinya @lid membuat
+  // WhatsApp menciptakan pesan di DUA chat (terlihat dobel di penerima).
+  // Duplikasi pemrosesan event sudah ditangani dedup id/body + shouldSend.
+  return chatId;
+}
+
+// Benteng terakhir anti-dobel: jangan kirim teks IDENTIK ke target yang sama
+// dalam 30 detik, apa pun penyebab pemrosesan gandanya.
+const lastSentText = new Map(); // target -> { text, at }
+function shouldSend(target, text) {
+  const prev = lastSentText.get(target);
+  if (prev && prev.text === text && Date.now() - prev.at < 30000) return false;
+  lastSentText.set(target, { text, at: Date.now() });
+  return true;
+}
+
+async function replyAsLaLa(chatId, chatName, text, senderNumber) {
+  const target = replyTarget(chatId, senderNumber);
+  if (!shouldSend(target, text)) return;
+  const sent = await client.sendMessage(target, text);
+  send('wa:message', {
+    id: sent.id?._serialized,
+    chatId,
+    chatName,
+    body: text,
+    fromMe: true,
+    author: 'LaLa',
+    type: 'chat',
+    timestamp: Date.now(),
+    hasMedia: false,
+    aiReply: true,
+  });
+}
+
+// Pesan chat pribadi dari nomor divisi Teknik dicoba sebagai laporan progres.
+// Foto (image) dari nomor Teknik diunduh ke staging; captionnya ikut diproses
+// sebagai teks laporan. true = sudah ditangani alur teknik (skip auto-reply).
+async function maybeTeknikReport(msg) {
+  try {
+    if (!teknik.configured()) return false;
+    if (msg.fromMe) return false;
+    if (msg.type !== 'chat' && msg.type !== 'image') return false;
+    const chat = await msg.getChat();
+    if (chat.isGroup) return false;
+    const chatId = chat.id._serialized;
+    const senderNumber = await resolveSenderNumber(chat.id);
+
+    let senderName = '';
+    try {
+      const contact = await msg.getContact();
+      senderName = contact.pushname || contact.name || '';
+    } catch (_) {}
+
+    if (msg.type === 'image' && msg.hasMedia) {
+      const media = await msg.downloadMedia().catch(() => null);
+      const st = media ? teknik.stagePhoto({ chatId, senderNumber, media }) : null;
+      if (!msg.body) {
+        // foto tanpa caption: cukup ack sekali di awal rentetan
+        if (st && st.ack) await replyAsLaLa(chatId, chat.name, st.ack, senderNumber);
+        return !!st;
+      }
+      // ada caption → lanjut diproses sebagai laporan di bawah
+    }
+
+    if (!msg.body) return false;
+    const res = await teknik.handleIncoming({
+      body: msg.body,
+      chatId,
+      senderNumber,
+      senderName,
+      history: convoHistory.get(chatId) || [],
+    });
+    if (!res) return false;
+    await replyAsLaLa(chatId, chat.name, res.reply, senderNumber);
+    // Catat ke riwayat percakapan AI supaya pertanyaan lanjutan user
+    // ("disana ada keterlambatan?") bisa dijawab LaLa dengan konteks ini.
+    pushHistory(chatId, 'user', msg.body);
+    pushHistory(chatId, 'assistant', res.reply);
+    // Aksi "cek" bisa menyertakan foto tersimpan unit → kirim sebagai media.
+    if (res.photos && res.photos.length) {
+      const target = replyTarget(chatId, senderNumber);
+      for (const p of res.photos) {
+        try {
+          const media = MessageMedia.fromFilePath(p.path);
+          await client.sendMessage(target, media, { caption: p.caption });
+        } catch (err) {
+          send('wa:error', 'Kirim foto gagal: ' + err.message);
+        }
+      }
+    }
+    return true;
+  } catch (err) {
+    send('wa:error', 'Laporan teknik gagal: ' + err.message);
+    return true; // sudah dalam alur teknik — jangan dijawab auto-reply generik
+  }
+}
+
 // ---- AI auto-reply ----------------------------------------------------------
 
 // chatId -> [{role, content}] (dipangkas ke 10 turn terakhir).
@@ -179,14 +362,40 @@ async function maybeAutoReply(msg) {
 
     pushHistory(chatId, 'user', msg.body);
     await chat.sendStateTyping();
+    const senderNumber = await resolveSenderNumber(chat.id);
+    let senderName = '';
+    try {
+      const contact = await msg.getContact();
+      senderName = contact.pushname || contact.name || '';
+    } catch (_) {}
+    // Nomor bisa terdaftar di lebih dari satu divisi — prioritaskan Teknik
+    // supaya panduan input progres ikut terbawa.
+    const senderNum = masterdata.normalizeNumber(senderNumber);
+    const senderRows = masterdata
+      .list()
+      .filter(
+        (r) => r.number && masterdata.normalizeNumber(r.number) === senderNum
+      );
+    const senderRow =
+      senderRows.find((r) =>
+        /tekni|dirops|direktur|direksi|ceo|owner|komisaris|pimpinan/i.test(
+          `${r.divisi || ''} ${r.kadev || ''}`
+        )
+      ) || senderRows[0];
     const reply = await ollama.autoReply({
       chatName: chat.name,
       incoming: msg.body,
       history: convoHistory.get(chatId).slice(0, -1),
       master: masterdata.list(),
+      senderNumber,
+      senderName,
+      senderRow,
+      toneLine: teknik.toneLine(senderNum),
     });
     if (!reply) return;
-    const sent = await client.sendMessage(chatId, reply);
+    const target = replyTarget(chatId, senderNum);
+    if (!shouldSend(target, reply)) return;
+    const sent = await client.sendMessage(target, reply);
     pushHistory(chatId, 'assistant', reply);
     send('wa:message', {
       id: sent.id?._serialized,
@@ -325,6 +534,8 @@ ipcMain.handle('wa:logout', async () => {
   setState('LOGGED_OUT');
 });
 
+ipcMain.handle('wa:resetSession', resetSession);
+
 ipcMain.handle('wa:restart', async () => {
   if (client) {
     try {
@@ -353,6 +564,7 @@ app.whenReady().then(async () => {
   await masterdata.init(userData, __dirname);
   await settings.init(userData);
   await reminders.init(userData);
+  await teknik.init(userData);
   createWindow();
   buildClient();
   startScheduler();
