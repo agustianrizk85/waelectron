@@ -38,6 +38,14 @@ contextBridge.exposeInMainWorld('wa', {
     test: (opts) => ipcRenderer.invoke('rem:test', opts),
   },
 
+  // CSO (komplain) ↔ dashboard :8088
+  cso: {
+    getConfig: () => ipcRenderer.invoke('cso:getConfig'),
+    setConfig: (patch) => ipcRenderer.invoke('cso:setConfig', patch),
+    status: () => ipcRenderer.invoke('cso:status'),
+    broadcast: (opts) => ipcRenderer.invoke('cso:broadcast', opts),
+  },
+
   // main -> renderer (events)
   on: (channel, cb) => {
     const allowed = [

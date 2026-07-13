@@ -12,6 +12,7 @@ const settings = require('./settings');
 const ollama = require('./ollama');
 const reminders = require('./reminders');
 const teknik = require('./teknik');
+const cso = require('./cso');
 
 // whatsapp-web.js bundles Puppeteer, but downloading Chromium fails in this
 // environment, so we point Puppeteer at the system Chrome install.
@@ -175,7 +176,9 @@ function buildClient() {
     }
     await relayMessage(msg, false);
     const handled = await maybeTeknikReport(msg);
-    if (!handled) await maybeAutoReply(msg);
+    if (handled) return;
+    const csoHandled = await maybeCsoComplaint(msg);
+    if (!csoHandled) await maybeAutoReply(msg);
   });
 
   client.on('message_create', async (msg) => {
@@ -342,6 +345,35 @@ async function maybeTeknikReport(msg) {
   }
 }
 
+// ---- Komplain CSO → tiket backend + WhatsApp ack -----------------------------
+
+// Pesan chat pribadi berawalan "#komplain" dari konsumen dibuatkan tiket di
+// backend CSO (:8088) dan dibalas ack (No. Tiket + SLA) sesuai SOP Step 1.
+// true = sudah ditangani alur komplain (skip auto-reply generik).
+async function maybeCsoComplaint(msg) {
+  try {
+    if (!cso.configured()) return false;
+    if (msg.fromMe || msg.type !== 'chat' || !msg.body) return false;
+    if (!cso.isComplaint(msg.body)) return false;
+    const chat = await msg.getChat();
+    if (chat.isGroup) return false;
+    const chatId = chat.id._serialized;
+    const senderNumber = await resolveSenderNumber(chat.id);
+    let senderName = '';
+    try {
+      const contact = await msg.getContact();
+      senderName = contact.pushname || contact.name || '';
+    } catch (_) {}
+    const res = await cso.handleIncoming({ body: msg.body, chatId, senderNumber, senderName });
+    if (!res) return false;
+    await replyAsLaLa(chatId, chat.name, res.reply, senderNumber);
+    return true;
+  } catch (err) {
+    send('wa:error', 'Komplain CSO gagal: ' + err.message);
+    return true; // sudah dalam alur komplain — jangan dijawab auto-reply generik
+  }
+}
+
 // ---- AI auto-reply ----------------------------------------------------------
 
 // chatId -> [{role, content}] (dipangkas ke 10 turn terakhir).
@@ -437,6 +469,10 @@ function startScheduler() {
       const sent = await reminders.tick(new Date(), sendToNumber, resolveTargetNumber);
       if (sent.length) send('wa:reminderSent', sent);
     } catch (_) {}
+    try {
+      const csoSent = await cso.tick(new Date(), sendToNumber);
+      if (csoSent) send('wa:reminderSent', [{ target: csoSent.sent, kind: 'cso-rekap' }]);
+    } catch (_) {}
   }, 30000);
 }
 
@@ -528,6 +564,23 @@ ipcMain.handle('rem:test', async (_e, { number, targetId, message }) => {
   return { ok: true };
 });
 
+// ---- CSO (komplain) ----
+
+ipcMain.handle('cso:getConfig', async () => cso.getConfig());
+ipcMain.handle('cso:setConfig', async (_e, patch) => cso.setConfig(patch));
+ipcMain.handle('cso:status', async () => {
+  try {
+    const alert = await cso.getAlert();
+    return { ok: true, alert };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+ipcMain.handle('cso:broadcast', async (_e, { target } = {}) => {
+  if (!client || lastState !== 'READY') throw new Error('WhatsApp belum siap');
+  return cso.broadcastNow(sendToNumber, target);
+});
+
 ipcMain.handle('wa:logout', async () => {
   if (!client) return;
   try {
@@ -567,6 +620,7 @@ app.whenReady().then(async () => {
   await settings.init(userData);
   await reminders.init(userData);
   await teknik.init(userData);
+  await cso.init(userData);
   createWindow();
   buildClient();
   startScheduler();
