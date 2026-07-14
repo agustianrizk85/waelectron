@@ -13,6 +13,7 @@ const ollama = require('./ollama');
 const reminders = require('./reminders');
 const teknik = require('./teknik');
 const cso = require('./cso');
+const keuangan = require('./keuangan');
 
 // whatsapp-web.js bundles Puppeteer, but downloading Chromium fails in this
 // environment, so we point Puppeteer at the system Chrome install.
@@ -473,6 +474,12 @@ function startScheduler() {
       const csoSent = await cso.tick(new Date(), sendToNumber);
       if (csoSent) send('wa:reminderSent', [{ target: csoSent.sent, kind: 'cso-rekap' }]);
     } catch (_) {}
+    try {
+      const keuSent = await keuangan.tick(new Date(), sendToNumber);
+      if (keuSent && keuSent.length) {
+        send('wa:reminderSent', keuSent.map((s) => ({ target: s.target, kind: `keuangan-${s.kind}`, doc: s.doc })));
+      }
+    } catch (_) {}
   }, 30000);
 }
 
@@ -581,6 +588,22 @@ ipcMain.handle('cso:broadcast', async (_e, { target } = {}) => {
   return cso.broadcastNow(sendToNumber, target);
 });
 
+// ---- Keuangan (purchasing PR/PO) ----
+
+ipcMain.handle('keu:getConfig', async () => keuangan.getConfig());
+ipcMain.handle('keu:setConfig', async (_e, patch) => keuangan.setConfig(patch));
+ipcMain.handle('keu:status', async () => {
+  try {
+    return { ok: true, ...(await keuangan.status()) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+ipcMain.handle('keu:broadcast', async (_e, { target } = {}) => {
+  if (!client || lastState !== 'READY') throw new Error('WhatsApp belum siap');
+  return keuangan.broadcastNow(sendToNumber, target);
+});
+
 ipcMain.handle('wa:logout', async () => {
   if (!client) return;
   try {
@@ -621,6 +644,7 @@ app.whenReady().then(async () => {
   await reminders.init(userData);
   await teknik.init(userData);
   await cso.init(userData);
+  await keuangan.init(userData);
   createWindow();
   buildClient();
   startScheduler();

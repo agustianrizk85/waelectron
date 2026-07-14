@@ -46,6 +46,14 @@ contextBridge.exposeInMainWorld('wa', {
     broadcast: (opts) => ipcRenderer.invoke('cso:broadcast', opts),
   },
 
+  // Keuangan (purchasing PR/PO) ↔ backend :8084
+  keu: {
+    getConfig: () => ipcRenderer.invoke('keu:getConfig'),
+    setConfig: (patch) => ipcRenderer.invoke('keu:setConfig', patch),
+    status: () => ipcRenderer.invoke('keu:status'),
+    broadcast: (opts) => ipcRenderer.invoke('keu:broadcast', opts),
+  },
+
   // main -> renderer (events)
   on: (channel, cb) => {
     const allowed = [
